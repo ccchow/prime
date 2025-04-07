@@ -16,6 +16,7 @@ from zeroband.diloco import Diloco
 from zeroband.loss import compute_cross_entropy_loss
 from zeroband.lr_scheduler import get_scheduler
 from zeroband.models.llama import get_model
+from zeroband.models.hf_llama import load_llama_model, load_llama_tokenizer  # Import LLaMA integration helpers
 from zeroband.optimizers import get_optimizer
 from zeroband.utils import (
     FakeTokenizer,
@@ -96,12 +97,12 @@ def train(config: Config):
 
     # Load tokenizer
     with sw.record_block("Load Tokenizer"):
+        # 1. Load tokenizer (supports HF LLaMA models)
         if config.data.fake and config.name_model == "debugmodel":
             tokenizer = FakeTokenizer()
-        elif config.type_model == "llama2":
-            tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1", use_fast=True)
-        elif config.type_model == "llama3":
-            tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B", use_fast=True)
+        elif config.hf_model_name or config.type_model in ("llama2", "llama3"):
+            # Use our specialized tokenizer loader for LLaMA models
+            tokenizer = load_llama_tokenizer(config)
         else:
             raise ValueError(f"Model type {config.type_model} not supported")
 
@@ -116,10 +117,16 @@ def train(config: Config):
         train_dataloader_iterator = iter(train_dataloader)
 
     with sw.record_block("Get Model"):
-        model, model_config = get_model(
-            config,
-            vocab_size=len(tokenizer) if config.name_model != "debugmodel" or not config.data.fake else TEST_VOCAB_SIZE,
-        )
+        # 2. Load model (HF LLaMA or custom) and config
+        if config.hf_model_name or (config.type_model in ("llama2", "llama3") and hasattr(config, "use_hf_model") and config.use_hf_model):
+            # Use Hugging Face LLaMA model loader
+            model, model_config = load_llama_model(config)
+        else:
+            # Use Prime's custom model implementation
+            model, model_config = get_model(
+                config,
+                vocab_size=len(tokenizer) if config.name_model != "debugmodel" or not config.data.fake else TEST_VOCAB_SIZE,
+            )
 
     gpu_peak_flops = get_peak_flops(torch.cuda.get_device_name(torch.device("cuda")))
     logger.info(f"Peak FLOPS used for computing MFU: {gpu_peak_flops:.3e}")
