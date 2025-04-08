@@ -65,7 +65,7 @@ def load_llama_model(config: Config) -> Tuple[torch.nn.Module, LlamaConfig]:
         model = LlamaForCausalLM.from_pretrained(
             model_name,
             config=model_config,
-            torch_dtype=torch.bfloat16  # Using bfloat16 by default for better training stability
+            torch_dtype=torch.bfloat16  # TODO: Using bfloat16 by default for better training stability
         )
     else:
         # Initialize a model from scratch with the config
