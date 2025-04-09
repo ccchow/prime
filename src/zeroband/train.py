@@ -17,6 +17,7 @@ from zeroband.loss import compute_cross_entropy_loss
 from zeroband.lr_scheduler import get_scheduler
 from zeroband.models.llama import get_model
 from zeroband.models.hf_llama import load_llama_model, load_llama_tokenizer  # Import LLaMA integration helpers
+from zeroband.models.hf_gpt2 import load_gpt2_model, load_gpt2_tokenizer  # Import GPT-2 integration helpers
 from zeroband.optimizers import get_optimizer
 from zeroband.utils import (
     FakeTokenizer,
@@ -97,12 +98,15 @@ def train(config: Config):
 
     # Load tokenizer
     with sw.record_block("Load Tokenizer"):
-        # 1. Load tokenizer (supports HF LLaMA models)
+        # 1. Load tokenizer (supports HF LLaMA and GPT-2 models)
         if config.data.fake and config.name_model == "debugmodel":
             tokenizer = FakeTokenizer()
-        elif config.hf_model_name or config.type_model in ("llama2", "llama3"):
+        elif config.type_model in ("llama2", "llama3"):
             # Use our specialized tokenizer loader for LLaMA models
             tokenizer = load_llama_tokenizer(config)
+        elif config.type_model == "gpt2":
+            # Use our specialized tokenizer loader for GPT-2 models
+            tokenizer = load_gpt2_tokenizer(config)
         else:
             raise ValueError(f"Model type {config.type_model} not supported")
 
@@ -117,10 +121,15 @@ def train(config: Config):
         train_dataloader_iterator = iter(train_dataloader)
 
     with sw.record_block("Get Model"):
-        # 2. Load model (HF LLaMA or custom) and config
-        if config.hf_model_name or (config.type_model in ("llama2", "llama3") and hasattr(config, "use_hf_model") and config.use_hf_model):
-            # Use Hugging Face LLaMA model loader
-            model, model_config = load_llama_model(config)
+        # 2. Load model (HF LLaMA, GPT-2, or custom) and config
+        if config.hf_model_name:
+            # Use Hugging Face model loader based on model type
+            if config.type_model in ("llama2", "llama3"):
+                model, model_config = load_llama_model(config)
+            elif config.type_model == "gpt2":
+                model, model_config = load_gpt2_model(config)
+            else:
+                raise ValueError(f"HF model type {config.type_model} not supported")
         else:
             # Use Prime's custom model implementation
             model, model_config = get_model(
