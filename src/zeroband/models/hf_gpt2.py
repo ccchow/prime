@@ -59,34 +59,20 @@ class GPT2ModelAdapter(torch.nn.Module):
     
     def forward(self, tokens, block_mask=None, **kwargs):
         """Adapt Prime's interface to Hugging Face GPT-2's interface."""
-        # Convert block_mask to a PyTorch tensor format that GPT-2 can use
+        # Process block_mask for GPT-2 attention mask format
         attention_mask = None
+        
         if block_mask is not None:
-            # Handle different possible mask formats
-            if hasattr(block_mask, 'to_tensor'):
-                # If it's a custom mask object with a conversion method
-                attention_mask = block_mask.to_tensor()
-            elif hasattr(block_mask, '__torch_function__'):
-                # If it's a tensor-like object that can be converted
-                attention_mask = torch.as_tensor(block_mask)
-            elif isinstance(block_mask, torch.Tensor):
-                # If it's already a tensor, use it directly
-                attention_mask = block_mask
-            else:
-                # Fallback - try direct conversion or warn
-                try:
-                    attention_mask = torch.as_tensor(block_mask)
-                except:
-                    print(f"Warning: Could not convert block_mask of type {type(block_mask)} to tensor")
-                    attention_mask = None
-    
-        # Convert parameter names to what GPT-2 expects
+            batch_size, seq_len = tokens.shape
+            attention_mask = torch.ones((batch_size, seq_len), dtype=torch.long, device=tokens.device)
+        
+        # Forward pass with correctly shaped attention_mask
         outputs = self.model(
             input_ids=tokens,
             attention_mask=attention_mask,
             **kwargs
         )
-        # Return logits which is what Prime's training loop expects
+        
         return outputs.logits
     
     def set_requires_gradient_sync(self, requires_sync):

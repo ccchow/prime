@@ -8,11 +8,11 @@ reshard_after_forward = false
 
 [optim]
 batch_size = 512
-warmup_steps = 500
-total_steps = 8192
+warmup_steps = 10
+total_steps = 200
 
 [diloco]
-inner_steps = 5
+inner_steps = 10
 
 [optim.optim]
 lr = 4e-4
