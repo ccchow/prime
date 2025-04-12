@@ -305,7 +305,13 @@ def test_hf_adapter_forward_pass(model_loader, config_fixture, request):
 
     # Run forward pass
     with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-        output = hf_model(tokens=tokens)
+        # Pass 'input_ids' instead of 'tokens' for HF compatibility
+        # This is needed because LlamaForCausalLM expects 'input_ids'
+        # while GPT2ModelAdapter handles the mapping internally.
+        if model_loader is load_llama_model:
+            output = hf_model(input_ids=tokens).logits # Llama returns CausalLMOutputWithPast
+        else:
+            output = hf_model(tokens=tokens) # GPT2Adapter handles this
 
     # Check output shape and properties
     assert output.shape == (batch_size, seq_len, vocab_size), "Output shape mismatch."
@@ -322,7 +328,8 @@ def test_hf_adapter_fsdp_wrapping(model_loader, config_fixture, request):
     """Test if FSDP wrapping can be applied to the adapted HF model layers."""
     # Basic setup for FSDP (no distributed environment needed for this simple check)
     config: Config = request.getfixturevalue(config_fixture)
-    hf_model, model_config = model_loader(config)
+    # Use _model_config as it's not used later in this specific test
+    hf_model, _model_config = model_loader(config)
     hf_model.to("cuda") # Move model to CUDA before wrapping
 
     # Create a dummy device mesh and policy for testing wrapping logic
@@ -366,14 +373,14 @@ def test_hf_adapter_fsdp_wrapping(model_loader, config_fixture, request):
     # Basic check: verify FSDP attributes are added (indicates wrapping occurred)
     # This check might be fragile depending on FSDP internal changes
     for layer in hf_model.layers.values():
-         if not hasattr(layer, "_fsdp_params"):
-             # Check if it's already compiled or has some other FSDP marker
-             if not hasattr(layer, "__compiled_fn__") and not hasattr(layer, "_forward_hook_handle"):
-                 pytest.fail(f"Layer {layer} does not seem to be FSDP wrapped.")
+        if not hasattr(layer, "_fsdp_params"):
+            # Check if it's already compiled or has some other FSDP marker
+            if not hasattr(layer, "__compiled_fn__") and not hasattr(layer, "_forward_hook_handle"):
+                pytest.fail(f"Layer {layer} does not seem to be FSDP wrapped.")
 
     if not hasattr(hf_model, "_fsdp_params"):
         if not hasattr(hf_model, "__compiled_fn__") and not hasattr(hf_model, "_forward_hook_handle"):
-             pytest.fail("Main model does not seem to be FSDP wrapped.")
+            pytest.fail("Main model does not seem to be FSDP wrapped.")
 
 
 @pytest.mark.skip(reason="Conceptual test: Requires detailed setup and comparison logic")
