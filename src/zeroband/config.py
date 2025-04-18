@@ -157,7 +157,7 @@ ENV_VAR_PREFIX = "ZERO_BAND_"
 class Config(BaseConfig):
     # main config
     name_model: Literal["debugmodel", "70M","150M", "271M", "1B", "7B", "10B", "13B", "26B", "70B"] = "150M"
-    type_model: Literal["llama2", "llama3", "gpt2"] = "llama3"
+    type_model: Literal["llama2", "llama3", "gpt2", "qwen"] = "llama3"
     # Hugging Face model support - overrides name_model and type_model when specified
     hf_model_name: str | None = None  # Path or name of a pretrained model on Hugging Face Hub
 

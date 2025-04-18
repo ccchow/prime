@@ -48,21 +48,23 @@ def get_peak_flops(device_name: str) -> int:
         return 312e12
 
 def get_num_flop_per_token(num_params: int, model_config, seq_len) -> int:
-    # Handle different model architectures with different config attribute naming
+    # Handle different model architectures with different config attribute naming.
+    # This includes common Hugging Face model configurations (e.g., LLaMA, GPT-2)
+    # loaded via helper functions, as well as custom model configs.
     if hasattr(model_config, 'n_layers'):
-        # LLaMA-style config
+        # LLaMA-style config (e.g., from HF LlamaConfig or custom)
         num_layers = model_config.n_layers
         num_heads = model_config.n_heads
         hidden_dim = model_config.dim
         head_dim = hidden_dim // num_heads
     elif hasattr(model_config, 'n_layer'):
-        # GPT-2 style config
+        # GPT-2 style config (e.g., from HF GPT2Config or custom)
         num_layers = model_config.n_layer
         num_heads = model_config.n_head
         hidden_dim = model_config.n_embd
         head_dim = hidden_dim // num_heads
     else:
-        raise ValueError("Unsupported model config: missing layer information")
+        raise ValueError("Unsupported model config: missing layer/dimension information")
     
     # Reasoning behind the factor of 12 for the self-attention part of the formula:
     # 1. each self-attention has 2 matmul in the forward and 4 in the backward (6)
