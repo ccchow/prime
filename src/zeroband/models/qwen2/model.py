@@ -1,4 +1,3 @@
-# filepath: src/zeroband/models/qwen2/model.py
 # Custom Qwen2 implementation for Prime, based on HuggingFace Qwen2 code and zeroband Llama model style.
 
 import torch
@@ -8,6 +7,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple, List
 from zeroband.models.norms import build_norm
 from zeroband.config import AttnFnType
+from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 
 # TODO: import or implement rotary embedding utilities from HF.
 
@@ -35,12 +35,48 @@ class ModelArgs:
 class Qwen2RotaryEmbedding(nn.Module):
     def __init__(self, config: ModelArgs, device=None):
         super().__init__()
-        # TODO: initialize inv_freq and scaling based on config.rope_theta and optional rope_scaling
-        raise NotImplementedError("Qwen2RotaryEmbedding not implemented")
+        # Determine rope type
+        if hasattr(config, "rope_scaling") and config.rope_scaling is not None:
+            self.rope_type = config.rope_scaling.get("rope_type", config.rope_scaling.get("type"))
+        else:
+            self.rope_type = "default"
+        self.config = config
+        self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
+        # initialize inverse frequency and scaling
+        inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self.original_inv_freq = inv_freq
+        self.max_seq_len_cached = config.max_position_embeddings
+        self.original_max_seq_len = config.max_position_embeddings
 
+    def _dynamic_frequency_update(self, position_ids: torch.LongTensor, device: torch.device):
+        seq_len = int(torch.max(position_ids)) + 1
+        # grow cache
+        if seq_len > self.max_seq_len_cached:
+            inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device, seq_len=seq_len)
+            self.register_buffer("inv_freq", inv_freq, persistent=False)
+            self.max_seq_len_cached = seq_len
+        # reset to original
+        if seq_len < self.original_max_seq_len and self.max_seq_len_cached > self.original_max_seq_len:
+            self.register_buffer("inv_freq", self.original_inv_freq, persistent=False)
+            self.max_seq_len_cached = self.original_max_seq_len
+
+    @torch.no_grad()
     def forward(self, x: torch.Tensor, position_ids: torch.LongTensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        # TODO: compute cos, sin tensors for rotary embeddings
-        raise NotImplementedError("Qwen2RotaryEmbedding forward not implemented")
+        # dynamic update if needed
+        if "dynamic" in self.rope_type:
+            self._dynamic_frequency_update(position_ids, x.device)
+        # compute frequencies
+        inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
+        position_ids_expanded = position_ids[:, None, :].float()
+        # determine autocast device
+        device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
+        with torch.autocast(device_type=device_type, enabled=False):
+            freqs = (inv_freq_expanded @ position_ids_expanded).transpose(1, 2)
+            emb = torch.cat((freqs, freqs), dim=-1)
+            cos = emb.cos() * self.attention_scaling
+            sin = emb.sin() * self.attention_scaling
+        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
 class Qwen2Attention(nn.Module):
     def __init__(self, config: ModelArgs, layer_idx: int):
