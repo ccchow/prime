@@ -8,6 +8,7 @@ from typing import Optional, Tuple, List
 from zeroband.models.norms import build_norm
 from zeroband.config import AttnFnType
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
+from transformers.models.qwen2.modeling_qwen2 import apply_rotary_pos_emb, eager_attention_forward, ALL_ATTENTION_FUNCTIONS
 
 # TODO: import or implement rotary embedding utilities from HF.
 
@@ -81,22 +82,82 @@ class Qwen2RotaryEmbedding(nn.Module):
 class Qwen2Attention(nn.Module):
     def __init__(self, config: ModelArgs, layer_idx: int):
         super().__init__()
-        # TODO: set up q_proj, k_proj, v_proj, o_proj, and other attention parameters
-        raise NotImplementedError("Qwen2Attention init not implemented")
+        self.config = config
+        self.layer_idx = layer_idx
+        self.n_heads = config.n_heads
+        self.n_kv_heads = config.n_kv_heads or config.n_heads
+        self.head_dim = config.dim // self.n_heads
+        self.scaling = self.head_dim ** -0.5
+        self.attention_dropout = config.attention_dropout
+        self.q_proj = nn.Linear(config.dim, self.n_heads * self.head_dim, bias=True)
+        self.k_proj = nn.Linear(config.dim, self.n_kv_heads * self.head_dim, bias=True)
+        self.v_proj = nn.Linear(config.dim, self.n_kv_heads * self.head_dim, bias=True)
+        self.o_proj = nn.Linear(self.n_heads * self.head_dim, config.dim, bias=False)
 
-    def forward(self, hidden_states: torch.Tensor, position_embeddings: Tuple[torch.Tensor, torch.Tensor], attention_mask: Optional[torch.Tensor], past_key_value=None, cache_position=None, output_attentions=False, use_cache=False):
-        # TODO: implement attention forward using rotary embeddings and optionally flash attention
-        raise NotImplementedError("Qwen2Attention forward not implemented")
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+        attention_mask: Optional[torch.Tensor],
+        past_key_value=None,
+        cache_position=None,
+        output_attentions: bool = False,
+        use_cache: bool = False,
+    ):
+        batch_size, seq_len, _ = hidden_states.shape
+        # project to multi-head QKV
+        q = self.q_proj(hidden_states).view(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(hidden_states).view(batch_size, seq_len, self.n_kv_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(hidden_states).view(batch_size, seq_len, self.n_kv_heads, self.head_dim).transpose(1, 2)
+        # apply rotary
+        cos, sin = position_embeddings
+        q, k = apply_rotary_pos_emb(q, k, cos, sin)
+        # update kv cache
+        if past_key_value is not None:
+            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+            k, v = past_key_value.update(k, v, self.layer_idx, cache_kwargs)
+        # sliding window
+        sliding_window = None
+        if (
+            self.config.use_sliding_window
+            and getattr(self.config, "sliding_window", None) is not None
+            and self.layer_idx >= self.config.max_window_layers
+        ):
+            sliding_window = self.config.sliding_window
+        # choose attention implementation
+        if self.config.attn_impl == "eager":
+            attention_fn = eager_attention_forward
+        else:
+            attention_fn = ALL_ATTENTION_FUNCTIONS[self.config.attn_impl]
+        # compute attention
+        attn_output, attn_weights = attention_fn(
+            self,
+            q,
+            k,
+            v,
+            attention_mask,
+            scaling=self.scaling,
+            dropout=0.0 if not self.training else self.attention_dropout,
+            sliding_window=sliding_window,
+        )
+        # reshape and output projection
+        attn_output = attn_output.reshape(batch_size, seq_len, self.n_heads * self.head_dim).contiguous()
+        attn_output = self.o_proj(attn_output)
+        return (attn_output, attn_weights) if output_attentions else attn_output
 
 class Qwen2MLP(nn.Module):
     def __init__(self, config: ModelArgs):
         super().__init__()
-        # TODO: set up gate_proj, up_proj, down_proj, and activation function based on config.hidden_act
-        raise NotImplementedError("Qwen2MLP init not implemented")
+        # TODO: ensure ModelArgs has `intermediate_size` matching Qwen2Config
+        intermediate_size = config.intermediate_size  # placeholder; add to ModelArgs
+        self.gate_proj = nn.Linear(config.dim, intermediate_size, bias=False)
+        self.up_proj = nn.Linear(config.dim, intermediate_size, bias=False)
+        self.down_proj = nn.Linear(intermediate_size, config.dim, bias=False)
+        self.act_fn = F.silu  # using SiLU as Qwen default
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # TODO: implement gated MLP forward
-        raise NotImplementedError("Qwen2MLP forward not implemented")
+        # gated activation: down_proj(act(gate_proj(x)) * up_proj(x))
+        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
 class Qwen2DecoderLayer(nn.Module):
     def __init__(self, config: ModelArgs, layer_idx: int):
