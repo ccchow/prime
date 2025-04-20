@@ -9,6 +9,7 @@ from zeroband.models.norms import build_norm
 from zeroband.config import AttnFnType
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from transformers.models.qwen2.modeling_qwen2 import apply_rotary_pos_emb, eager_attention_forward, ALL_ATTENTION_FUNCTIONS
+from transformers.modeling_outputs import CausalLMOutputWithPast
 
 # TODO: import or implement rotary embedding utilities from HF.
 
@@ -216,19 +217,151 @@ class Qwen2DecoderLayer(nn.Module):
 class Qwen2Model(nn.Module):
     def __init__(self, config: ModelArgs):
         super().__init__()
-        # TODO: implement embed_tokens, layers, rotary_emb, final norm
-        raise NotImplementedError("Qwen2Model init not implemented")
+        # token embeddings
+        self.embed_tokens = nn.Embedding(config.vocab_size, config.dim, padding_idx=0)  # TODO: allow custom pad_token_id
+        # rotary positional embedding
+        self.rotary_emb = Qwen2RotaryEmbedding(config)
+        # transformer layers
+        self.layers = nn.ModuleList([Qwen2DecoderLayer(config, i) for i in range(config.n_layers)])
+        # final normalization
+        self.norm = build_norm(config.dim, config.norm_eps)
 
-    def forward(self, input_ids: torch.LongTensor = None, attention_mask: Optional[torch.Tensor] = None, position_ids: Optional[torch.LongTensor] = None, past_key_values=None, inputs_embeds=None, use_cache=None, output_attentions=None, output_hidden_states=None, return_dict=None, cache_position=None, **kwargs):
-        # TODO: implement forward pass
-        raise NotImplementedError("Qwen2Model forward not implemented")
+    def forward(
+        self,
+        input_ids: torch.LongTensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values=None,
+        inputs_embeds=None,
+        use_cache: bool = False,
+        output_attentions: bool = False,
+        output_hidden_states: bool = False,
+        return_dict: bool = False,
+        cache_position=None,
+        **kwargs
+    ):
+        # input embeddings
+        if inputs_embeds is None:
+            hidden_states = self.embed_tokens(input_ids)
+        else:
+            hidden_states = inputs_embeds
+        batch_size, seq_len, _ = hidden_states.size()
+        # position ids
+        if position_ids is None:
+            position_ids = torch.arange(seq_len, device=hidden_states.device).unsqueeze(0).expand(batch_size, -1)
+        # rotary embeddings
+        cos, sin = self.rotary_emb(hidden_states, position_ids)
+        # build causal attention mask
+        if attention_mask is not None:
+            # 2D mask to float mask with -inf for masked positions
+            causal = torch.tril(torch.ones((seq_len, seq_len), device=hidden_states.device))
+            attn_mask = attention_mask.view(batch_size,1,1,seq_len) * causal.unsqueeze(0)
+            attn_mask = (1.0 - attn_mask) * -1e9
+        else:
+            attn_mask = None
+        # iterate layers
+        all_hidden_states = () if output_hidden_states else None
+        all_attentions = () if output_attentions else None
+        for layer in self.layers:
+            if output_hidden_states:
+                all_hidden_states += (hidden_states,)
+            # forward layer
+            outputs = layer(
+                hidden_states,
+                attention_mask=attn_mask,
+                position_ids=position_ids,
+                past_key_value=None,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+                cache_position=cache_position,
+                position_embeddings=(cos, sin),
+            )
+            # unpack
+            hidden_states = outputs[0]
+            if output_attentions:
+                all_attentions += (outputs[1],)
+        # final norm
+        hidden_states = self.norm(hidden_states)
+        if output_hidden_states:
+            all_hidden_states += (hidden_states,)
+        # return tuple
+        outputs = (hidden_states,)
+        if output_hidden_states:
+            outputs += (all_hidden_states,)
+        if output_attentions:
+            outputs += (all_attentions,)
+        return outputs
 
 class Qwen2ForCausalLM(nn.Module):  # TODO: extend GenerationMixin if available
     def __init__(self, config: ModelArgs):
         super().__init__()
-        # TODO: instantiate Qwen2Model and lm_head
-        raise NotImplementedError("Qwen2ForCausalLM init not implemented")
+        # base model
+        self.model = Qwen2Model(config)
+        # language modeling head
+        self.lm_head = nn.Linear(config.dim, config.vocab_size, bias=False)
+        # tie weights
+        try:
+            self.lm_head.weight = self.model.embed_tokens.weight
+        except Exception:
+            pass
 
-    def forward(self, input_ids=None, attention_mask=None, position_ids=None, past_key_values=None, inputs_embeds=None, labels=None, use_cache=None, output_attentions=None, output_hidden_states=None, return_dict=None, cache_position=None, num_logits_to_keep=0, **kwargs):
-        # TODO: implement forward logic, compute logits and loss
-        raise NotImplementedError("Qwen2ForCausalLM forward not implemented")
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        position_ids=None,
+        past_key_values=None,
+        inputs_embeds=None,
+        labels=None,
+        use_cache=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=False,
+        cache_position=None,
+        num_logits_to_keep: int = 0,
+        **kwargs
+    ):
+        # run base model
+        outputs = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+            cache_position=cache_position,
+            **kwargs,
+        )
+        hidden_states = outputs[0]
+        # compute logits
+        logits = self.lm_head(hidden_states)
+        # slice logits if needed
+        if num_logits_to_keep and num_logits_to_keep > 0:
+            logits = logits[..., :num_logits_to_keep]
+        loss = None
+        if labels is not None:
+            # shift so that tokens < n predict n
+            loss = F.cross_entropy(
+                logits.view(-1, logits.size(-1)), labels.view(-1), ignore_index=-100
+            )
+        if return_dict:
+            return CausalLMOutputWithPast(
+                loss=loss,
+                logits=logits,
+                past_key_values=None,
+                hidden_states=outputs[1] if output_hidden_states else None,
+                attentions=outputs[2] if output_attentions else None,
+            )
+        # else return tuple
+        result = ()
+        if loss is not None:
+            result += (loss,)
+        result += (logits,)
+        if output_hidden_states:
+            result += (outputs[1],)
+        if output_attentions:
+            result += (outputs[2],)
+        return result
