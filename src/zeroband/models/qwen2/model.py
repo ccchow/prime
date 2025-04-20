@@ -162,12 +162,56 @@ class Qwen2MLP(nn.Module):
 class Qwen2DecoderLayer(nn.Module):
     def __init__(self, config: ModelArgs, layer_idx: int):
         super().__init__()
-        # TODO: instantiate attention, mlp, input and post-attn norms
-        raise NotImplementedError("Qwen2DecoderLayer init not implemented")
+        # layer normalization before attention
+        self.input_layernorm = build_norm(config.dim, config.norm_eps)
+        # self-attention module
+        self.self_attn = Qwen2Attention(config, layer_idx)
+        # layer normalization before MLP
+        self.post_attention_layernorm = build_norm(config.dim, config.norm_eps)
+        # gated feed-forward module
+        self.mlp = Qwen2MLP(config)
 
-    def forward(self, hidden_states: torch.Tensor, attention_mask=None, position_ids=None, past_key_value=None, output_attentions=False, use_cache=False, cache_position=None, position_embeddings=None):
-        # TODO: implement decoder layer forward pass
-        raise NotImplementedError("Qwen2DecoderLayer forward not implemented")
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask=None,
+        position_ids=None,
+        past_key_value=None,
+        output_attentions: bool = False,
+        use_cache: bool = False,
+        cache_position=None,
+        position_embeddings: Tuple[torch.Tensor, torch.Tensor] = None,
+    ):
+        # Self-attention block
+        residual = hidden_states
+        normed = self.input_layernorm(hidden_states)
+        attn_out = self.self_attn(
+            normed,
+            position_embeddings,
+            attention_mask,
+            past_key_value,
+            cache_position,
+            output_attentions=output_attentions,
+            use_cache=use_cache,
+        )
+        if output_attentions:
+            attn_output, attn_weights = attn_out
+        else:
+            attn_output = attn_out
+            attn_weights = None
+        hidden_states = residual + attn_output
+
+        # MLP block
+        residual = hidden_states
+        normed = self.post_attention_layernorm(hidden_states)
+        mlp_output = self.mlp(normed)
+        hidden_states = residual + mlp_output
+
+        # prepare outputs
+        outputs = (hidden_states,)
+        if output_attentions:
+            outputs += (attn_weights,)
+        return outputs
 
 class Qwen2Model(nn.Module):
     def __init__(self, config: ModelArgs):
