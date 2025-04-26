@@ -10,6 +10,7 @@ from zeroband.models.qwen2.model import ModelArgs, Qwen2ForCausalLM
 # Qwen2 7B default configuration
 qwen2_configs = {
     "Qwen/Qwen2.5-0.5B": ModelArgs(
+        hidden_size=896,
         dim=896,
         n_layers=24,
         n_heads=14,
