@@ -123,7 +123,7 @@ def train(config: Config):
             elif config.type_model == "qwen":
                 tokenizer = load_qwen2_omni_tokenizer(config)
             elif config.type_model == "qwen2":
-                tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B", use_fast=True)
+                tokenizer = AutoTokenizer.from_pretrained(config.name_model, use_fast=True)
             else:
                 raise ValueError(f"Model type {config.type_model} not supported")
 
@@ -168,7 +168,7 @@ def train(config: Config):
                     config,
                     vocab_size=len(tokenizer) if config.name_model != "debugmodel" or not config.data.fake else TEST_VOCAB_SIZE,
                 )
-                model = load_hf_weights(model, "Qwen/Qwen2.5-7B")
+                model = load_hf_weights(model, config.name_model)
             else:
                 raise ValueError(f"Model type {config.type_model} not supported")
 
