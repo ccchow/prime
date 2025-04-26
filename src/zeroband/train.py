@@ -20,6 +20,7 @@ from zeroband.models.hf_llama import load_llama_model, load_llama_tokenizer  # I
 from zeroband.models.hf_gpt2 import load_gpt2_model, load_gpt2_tokenizer  # Import GPT-2 integration helpers
 from zeroband.models.hf_qwen import load_qwen2_omni_model, load_qwen2_omni_tokenizer  # Import Qwen HF integration
 from zeroband.models.qwen import get_model as get_qwen_model  # Import Prime custom Qwen model
+from zeroband.models.qwen2 import get_model as get_qwen2_model, load_hf_weights  # Import Prime custom Qwen2 model
 from zeroband.optimizers import get_optimizer
 from zeroband.utils import (
     FakeTokenizer,
@@ -112,7 +113,7 @@ def train(config: Config):
             elif config.type_model == "gpt2":
                 tokenizer = load_gpt2_tokenizer(config)
             else:
-                raise ValueError(f"HF tokenizer for model {config.hf_model_name} not supported")
+                raise ValueError(f"Tokenizer for Hugging Face model {config.hf_model_name} not supported")
         else:
             # Use our specialized tokenizer loader for non-HF models
             if config.type_model in ("llama2", "llama3"):
@@ -121,6 +122,8 @@ def train(config: Config):
                 tokenizer = load_gpt2_tokenizer(config)
             elif config.type_model == "qwen":
                 tokenizer = load_qwen2_omni_tokenizer(config)
+            elif config.type_model == "qwen2":
+                tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B", use_fast=True)
             else:
                 raise ValueError(f"Model type {config.type_model} not supported")
 
@@ -145,7 +148,7 @@ def train(config: Config):
             elif config.type_model == "gpt2":
                 model, model_config = load_gpt2_model(config)
             else:
-                raise ValueError(f"HF model type for {config.hf_model_name} not supported")
+                raise ValueError(f"Hugging Face model {config.hf_model_name} not supported")
         else:
             # Use Prime's custom model implementation
             if config.type_model in ("llama2", "llama3"):
@@ -160,6 +163,12 @@ def train(config: Config):
                     config,
                     vocab_size=len(tokenizer) if config.name_model != "debugmodel" or not config.data.fake else TEST_VOCAB_SIZE,
                 )
+            elif config.type_model == "qwen2":
+                model, model_config = get_qwen2_model(
+                    config,
+                    vocab_size=len(tokenizer) if config.name_model != "debugmodel" or not config.data.fake else TEST_VOCAB_SIZE,
+                )
+                model = load_hf_weights(model, "Qwen/Qwen2.5-7B")
             else:
                 raise ValueError(f"Model type {config.type_model} not supported")
 
