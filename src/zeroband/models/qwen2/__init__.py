@@ -8,7 +8,14 @@ from zeroband.config import Config
 from zeroband.models.qwen2.model import ModelArgs, Qwen2ForCausalLM
 
 # Qwen2 7B default configuration
-qwen2_7b_configs = {
+qwen2_configs = {
+    "Qwen/Qwen2.5-0.5B": ModelArgs(
+        dim=896,
+        n_layers=24,
+        n_heads=14,
+        n_kv_heads=2,
+        rope_theta=1000000,
+    ),
     "7B": ModelArgs(
         dim=3584,
         n_layers=28,
@@ -27,7 +34,7 @@ def get_model(
     """get the Qwen2ForCausalLM model"""
 
     if config.type_model == "qwen2":
-        model_config = qwen2_7b_configs[config.name_model]
+        model_config = qwen2_configs[config.name_model]
     else:
         raise ValueError(f"Model type {config.type_model} not supported")
 
