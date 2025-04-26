@@ -15,6 +15,7 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 
 @dataclass
 class ModelArgs:
+    hidden_size: int = 4096
     dim: int = 4096
     n_layers: int = 32
     n_heads: int = 32
