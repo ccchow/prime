@@ -104,16 +104,16 @@ def train(config: Config):
         # 1. Load tokenizer, support custom HuggingFace Qwen2.5-Omni and existing models
         if config.data.fake and config.name_model == "debugmodel":
             tokenizer = FakeTokenizer()
-        elif config.hf_model_name:
-            # Use HF model tokenizer based on model name
-            if "Qwen" in config.hf_model_name:
+        elif config.hf_model_name or config.type_model == "qwen2":
+            # Use HF tokenizer for Qwen2 or other Hugging Face models
+            if config.type_model == "qwen2" or (config.hf_model_name and "Qwen" in config.hf_model_name):
                 tokenizer = load_qwen2_omni_tokenizer(config)
-            elif config.type_model in ("llama2", "llama3"):
+            elif config.hf_model_name and config.type_model in ("llama2", "llama3"):
                 tokenizer = load_llama_tokenizer(config)
-            elif config.type_model == "gpt2":
+            elif config.hf_model_name and config.type_model == "gpt2":
                 tokenizer = load_gpt2_tokenizer(config)
             else:
-                raise ValueError(f"Tokenizer for Hugging Face model {config.hf_model_name} not supported")
+                raise ValueError(f"Tokenizer for Hugging Face model or qwen2 not supported: type_model={config.type_model}, hf_model_name={config.hf_model_name}")
         else:
             # Use our specialized tokenizer loader for non-HF models
             if config.type_model in ("llama2", "llama3"):
@@ -164,10 +164,9 @@ def train(config: Config):
                     vocab_size=len(tokenizer) if config.name_model != "debugmodel" or not config.data.fake else TEST_VOCAB_SIZE,
                 )
             elif config.type_model == "qwen2":
-                model, model_config = get_qwen2_model(
-                    config,
-                    vocab_size=len(tokenizer) if config.name_model != "debugmodel" or not config.data.fake else TEST_VOCAB_SIZE,
-                )
+                # For custom Qwen2, use pretrained HF weights; preserve vocab_size from ModelArgs
+                vocab_override = TEST_VOCAB_SIZE if (config.data.fake and config.name_model == "debugmodel") else None
+                model, model_config = get_qwen2_model(config, vocab_size=vocab_override)
                 model = load_hf_weights(model, config.name_model)
             else:
                 raise ValueError(f"Model type {config.type_model} not supported")

@@ -10,6 +10,7 @@ from zeroband.config import AttnFnType
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from transformers.models.qwen2.modeling_qwen2 import apply_rotary_pos_emb, eager_attention_forward, ALL_ATTENTION_FUNCTIONS
 from transformers.modeling_outputs import CausalLMOutputWithPast
+import math
 
 # TODO: import or implement rotary embedding utilities from HF.
 
@@ -19,6 +20,7 @@ class ModelArgs:
     dim: int = 4096
     n_layers: int = 32
     n_heads: int = 32
+    num_attention_heads: int = 32
     n_kv_heads: Optional[int] = None
     vocab_size: int = -1  # defined later by tokenizer
     multiple_of: int = 256  # make hidden size multiple of this
@@ -32,6 +34,7 @@ class ModelArgs:
     max_window_layers: int = 28
     attention_dropout: float = 0.0
     attn_impl: str = "eager"  # or 'flash', 'sdpa', etc.
+    intermediate_size: Optional[int] = None     # new — FFN hidden size
 
 # TODO: implement bytes_to_unicode, get_pairs, BPE encoder if needed or use HF tokenizer externally.
 
@@ -150,11 +153,15 @@ class Qwen2Attention(nn.Module):
 class Qwen2MLP(nn.Module):
     def __init__(self, config: ModelArgs):
         super().__init__()
-        # TODO: ensure ModelArgs has `intermediate_size` matching Qwen2Config
-        intermediate_size = config.intermediate_size  # placeholder; add to ModelArgs
-        self.gate_proj = nn.Linear(config.dim, intermediate_size, bias=False)
-        self.up_proj = nn.Linear(config.dim, intermediate_size, bias=False)
-        self.down_proj = nn.Linear(intermediate_size, config.dim, bias=False)
+        # derive intermediate size if not explicitly set
+        if config.intermediate_size is None:
+            mult = config.ffn_dim_multiplier or 4
+            inter = int(math.ceil((config.dim * mult) / config.multiple_of) * config.multiple_of)
+        else:
+            inter = config.intermediate_size
+        self.gate_proj = nn.Linear(config.dim, inter, bias=False)
+        self.up_proj   = nn.Linear(config.dim, inter, bias=False)
+        self.down_proj = nn.Linear(inter, config.dim, bias=False)
         self.act_fn = F.silu  # using SiLU as Qwen default
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -165,11 +172,11 @@ class Qwen2DecoderLayer(nn.Module):
     def __init__(self, config: ModelArgs, layer_idx: int):
         super().__init__()
         # layer normalization before attention
-        self.input_layernorm = build_norm(config.dim, config.norm_eps)
+        self.input_layernorm = build_norm("rmsnorm", config.dim, config.norm_eps)
         # self-attention module
         self.self_attn = Qwen2Attention(config, layer_idx)
         # layer normalization before MLP
-        self.post_attention_layernorm = build_norm(config.dim, config.norm_eps)
+        self.post_attention_layernorm = build_norm("rmsnorm", config.dim, config.norm_eps)
         # gated feed-forward module
         self.mlp = Qwen2MLP(config)
 
@@ -225,7 +232,7 @@ class Qwen2Model(nn.Module):
         # transformer layers
         self.layers = nn.ModuleList([Qwen2DecoderLayer(config, i) for i in range(config.n_layers)])
         # final normalization
-        self.norm = build_norm(config.dim, config.norm_eps)
+        self.norm = build_norm("rmsnorm", config.dim, config.norm_eps)
 
     def forward(
         self,
@@ -293,7 +300,7 @@ class Qwen2Model(nn.Module):
             outputs += (all_attentions,)
         return outputs
 
-class Qwen2ForCausalLM(nn.Module):  # TODO: extend GenerationMixin if available
+class Qwen2ForCausalLM(nn.Module):
     def __init__(self, config: ModelArgs):
         super().__init__()
         # base model
@@ -305,6 +312,12 @@ class Qwen2ForCausalLM(nn.Module):  # TODO: extend GenerationMixin if available
             self.lm_head.weight = self.model.embed_tokens.weight
         except Exception:
             pass
+        # no direct module exposure; use properties for consistency
+
+    @property
+    def layers(self):
+        # Return a dict of layer index to decoder layer for FSDP sharding
+        return dict(enumerate(self.model.layers))
 
     def forward(
         self,

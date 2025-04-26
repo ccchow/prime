@@ -14,8 +14,16 @@ qwen2_configs = {
         dim=896,
         n_layers=24,
         n_heads=14,
+        num_attention_heads=14,
         n_kv_heads=2,
-        rope_theta=1000000,
+        intermediate_size=4864,      # new
+        max_position_embeddings=32768,
+        max_window_layers=24,
+        rope_theta=1_000_000,
+        sliding_window=32768,
+        use_sliding_window=False,
+        attention_dropout=0.0,
+        vocab_size=151936,
     ),
     "7B": ModelArgs(
         dim=3584,
