@@ -99,6 +99,10 @@ def load_hf_weights(
     for k, v in hf_model.state_dict().items():
         for new_k, new_v in _convert_key(k, v):
             new_state[new_k] = new_v
+    # Adjust lm_head key to match custom model: remove leading 'model.'
+    head_key = 'model.lm_head.weight'
+    if head_key in new_state:
+        new_state['lm_head.weight'] = new_state.pop(head_key)
 
     missing, unexpected = model.load_state_dict(new_state, strict=False)
     if missing:

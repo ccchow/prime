@@ -91,6 +91,8 @@ class Qwen2Attention(nn.Module):
         self.layer_idx = layer_idx
         self.n_heads = config.n_heads
         self.n_kv_heads = config.n_kv_heads or config.n_heads
+        # Number of repeats of each KV head to match query heads
+        self.num_key_value_groups = self.n_heads // self.n_kv_heads
         self.head_dim = config.dim // self.n_heads
         self.scaling = self.head_dim ** -0.5
         self.attention_dropout = config.attention_dropout
