@@ -136,7 +136,7 @@ def load_qwen2_omni_tokenizer(config: Config) -> PreTrainedTokenizer:
     """
     Load the Qwen2.5-Omni-7B tokenizer from Hugging Face.
     """
-    tokenizer_name = config.hf_model_name or "Qwen/Qwen2.5-Omni-7B"
+    tokenizer_name = config.hf_model_name or "Qwen/Qwen2.5-0.5B"
     tokenizer = AutoTokenizer.from_pretrained(
         tokenizer_name,
         use_fast=True,
