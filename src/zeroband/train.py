@@ -356,7 +356,10 @@ def train(config: Config):
 
                     with sw.record_block("Run forward()"):
                         # logits = model(tokens=input_ids, block_mask=block_mask).contiguous()
-                        logits = model(input_ids=input_ids, attention_mask=None)
+                        outputs = model(input_ids=input_ids, attention_mask=None)
+                        # Qwen2 returns a tuple (logits, ...); unpack it
+                        logits = outputs[0] if isinstance(outputs, (tuple, list)) else outputs
+                        logits = logits.contiguous()
                         flatten_logits = logits.reshape(-1, logits.size(-1))  # b seq vocab -> (b * seq) vocab
                         flatten_labels = labels.reshape(-1)  # b seq -> (b * seq)
 
