@@ -9,6 +9,7 @@ from zeroband.models.norms import build_norm
 from zeroband.config import AttnFnType
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from transformers.models.qwen2.modeling_qwen2 import apply_rotary_pos_emb, eager_attention_forward, ALL_ATTENTION_FUNCTIONS
+from torch.nn.attention.flex_attention import flex_attention, BlockMask
 from transformers.modeling_outputs import CausalLMOutputWithPast
 import math
 
@@ -108,6 +109,7 @@ class Qwen2Attention(nn.Module):
         attention_mask: Optional[torch.Tensor],
         past_key_value=None,
         cache_position=None,
+        block_mask: Optional[BlockMask] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
     ):
@@ -131,22 +133,27 @@ class Qwen2Attention(nn.Module):
             and self.layer_idx >= self.config.max_window_layers
         ):
             sliding_window = self.config.sliding_window
-        # choose attention implementation
-        if self.config.attn_impl == "eager":
-            attention_fn = eager_attention_forward
+        # if block_mask provided, use block-sparse flex attention
+        if block_mask is not None:
+            attn_output = flex_attention(q, k, v, block_mask=block_mask)
+            attn_weights = None
         else:
-            attention_fn = ALL_ATTENTION_FUNCTIONS[self.config.attn_impl]
-        # compute attention
-        attn_output, attn_weights = attention_fn(
-            self,
-            q,
-            k,
-            v,
-            attention_mask,
-            scaling=self.scaling,
-            dropout=0.0 if not self.training else self.attention_dropout,
-            sliding_window=sliding_window,
-        )
+            # choose attention implementation
+            if self.config.attn_impl == "eager":
+                attention_fn = eager_attention_forward
+            else:
+                attention_fn = ALL_ATTENTION_FUNCTIONS[self.config.attn_impl]
+            # compute attention
+            attn_output, attn_weights = attention_fn(
+                self,
+                q,
+                k,
+                v,
+                attention_mask,
+                scaling=self.scaling,
+                dropout=0.0 if not self.training else self.attention_dropout,
+                sliding_window=sliding_window,
+            )
         # reshape and output projection
         attn_output = attn_output.reshape(batch_size, seq_len, self.n_heads * self.head_dim).contiguous()
         attn_output = self.o_proj(attn_output)
@@ -186,6 +193,7 @@ class Qwen2DecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         attention_mask=None,
+        block_mask: Optional[BlockMask] = None,
         position_ids=None,
         past_key_value=None,
         output_attentions: bool = False,
@@ -202,6 +210,7 @@ class Qwen2DecoderLayer(nn.Module):
             attention_mask,
             past_key_value,
             cache_position,
+            block_mask=block_mask,
             output_attentions=output_attentions,
             use_cache=use_cache,
         )
@@ -240,6 +249,7 @@ class Qwen2Model(nn.Module):
         self,
         input_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
+        block_mask: Optional[BlockMask] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_values=None,
         inputs_embeds=None,
@@ -279,6 +289,7 @@ class Qwen2Model(nn.Module):
             outputs = layer(
                 hidden_states,
                 attention_mask=attn_mask,
+                block_mask=block_mask,
                 position_ids=position_ids,
                 past_key_value=None,
                 output_attentions=output_attentions,
@@ -325,6 +336,7 @@ class Qwen2ForCausalLM(nn.Module):
         self,
         input_ids=None,
         attention_mask=None,
+        block_mask: Optional[BlockMask] = None,
         position_ids=None,
         past_key_values=None,
         inputs_embeds=None,
@@ -341,6 +353,7 @@ class Qwen2ForCausalLM(nn.Module):
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
+            block_mask=block_mask,
             position_ids=position_ids,
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
