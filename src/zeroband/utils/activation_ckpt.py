@@ -1,5 +1,6 @@
 import torch.nn as Module
 from torch.nn import ModuleList # Add import for ModuleList
+from collections.abc import Mapping
 
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import checkpoint_wrapper
 
@@ -27,18 +28,24 @@ def apply_ac_ckpt(model: Module, num: int):
         logger.warning("Could not find standard layer container ('layers', 'transformer.h', 'model.layers'). Activation checkpointing not applied.")
         return model # Return original model if layers not found
 
-    if not hasattr(layer_container, 'named_children') and not isinstance(layer_container, ModuleList):
+    # Determine how to iterate over the layer container
+    container_type = None
+    if isinstance(layer_container, Mapping):
+        iterable_layers = list(layer_container.items())
+        container_type = "mapping"
+    elif not hasattr(layer_container, 'named_children') and not isinstance(layer_container, ModuleList):
         logger.warning(f"Layer container type {type(layer_container)} not directly supported for named iteration. Activation checkpointing may not be applied correctly.")
-        # Attempt iteration anyway if possible, otherwise return
+        # Attempt iteration anyway as a list/sequence
         try:
-            # Try iterating with enumerate if it's a list/sequence
             iterable_layers = list(enumerate(layer_container))
+            container_type = "list"
         except TypeError:
             logger.error("Cannot iterate over the found layer container.")
             return model
     else:
-        # Prefer named_children if available, otherwise assume ModuleList index access
+        # Prefer named_children if available, otherwise assume ModuleList or sequence access
         iterable_layers = layer_container.named_children() if hasattr(layer_container, 'named_children') else enumerate(layer_container)
+        container_type = "named"
 
 
     applied_count = 0
@@ -51,10 +58,12 @@ def apply_ac_ckpt(model: Module, num: int):
 
         if current_index % num == 0:
             wrapped_layer = checkpoint_wrapper(layer, preserve_rng_state=False)
-            if is_list_like:
+            if container_type == "mapping":
+                layer_container[idx] = wrapped_layer
+            elif is_list_like:
                 layer_container[current_index] = wrapped_layer
-            elif hasattr(layer_container, 'register_module'): # Handles ModuleDict or custom containers with register_module
-                layer_container.register_module(str(idx), wrapped_layer) # Use original idx (could be string)
+            elif hasattr(layer_container, 'register_module'): # Handles ModuleDict or custom containers
+                layer_container.register_module(str(idx), wrapped_layer)
             else:
                 # Fallback: Try setting attribute directly if possible (less common)
                 try:
