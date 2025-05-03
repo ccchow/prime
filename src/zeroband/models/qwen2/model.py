@@ -135,7 +135,14 @@ class Qwen2Attention(nn.Module):
             sliding_window = self.config.sliding_window
         # if block_mask provided, use block-sparse flex attention
         if block_mask is not None:
-            attn_output = flex_attention(q, k, v, block_mask=block_mask)
+            try:
+                attn_output = flex_attention(
+                    q, k, v,
+                    block_mask=block_mask,
+                    enable_gqa=True,
+                )
+            except TypeError:
+                attn_output = flex_attention(q, k, v, block_mask=block_mask)
             attn_weights = None
         else:
             # choose attention implementation

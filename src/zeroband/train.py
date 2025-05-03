@@ -356,7 +356,7 @@ def train(config: Config):
 
                     with sw.record_block("Run forward()"):
                         # logits = model(tokens=input_ids, block_mask=block_mask).contiguous()
-                        outputs = model(input_ids=input_ids, attention_mask=None)
+                        outputs = model(input_ids=input_ids, block_mask=block_mask)
                         # Qwen2 returns a tuple (logits, ...); unpack it
                         logits = outputs[0] if isinstance(outputs, (tuple, list)) else outputs
                         logits = logits.contiguous()
