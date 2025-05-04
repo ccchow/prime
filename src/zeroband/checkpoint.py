@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import dill 
 import gc
 import multiprocessing
 import os
@@ -320,7 +321,7 @@ class CkptManager:
         os.makedirs(data_path, exist_ok=True)
         with open(os.path.join(data_path, f"_{local_rank}.pt"), "wb") as f:
             state = {"data_loader": dataloader.state_dict()}
-            torch.save(state, f)
+            torch.save(state, f, pickle_module=dill) # use dill to save the state dict
 
     def _async_save_remote(self, ckpt_path: str, remote_ckpt_path: str, blocking: bool = True) -> None:
         """asyncronously rsync a ckpt folder to a remote location. Using fsspec to handle remote cloud storage without to install
