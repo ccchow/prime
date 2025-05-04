@@ -1,5 +1,5 @@
 name_model = "Qwen/Qwen2.5-0.5B"
-project = "/tmp/debug"
+project = "qwen2_0.5B"
 metric_logger_type = "dummy"
 type_model = "qwen2"
 
@@ -12,9 +12,16 @@ batch_size = 16
 warmup_steps = 10
 total_steps = 4
 
+[optim.optim]
+lr = 7e-4
+
 [data]
-fake = true
+seq_length = 1024
+dataset_name_or_paths = "datasets/fineweb-edu"
 
 [diloco]
 inner_steps = 5
 
+[ckpt]
+interval = 5
+path = "/home/lei/git/prime/qwen2_0.5B_ckpt"
