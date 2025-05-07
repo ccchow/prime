@@ -133,6 +133,8 @@ class CkptConfig(BaseConfig):
 
     token_count: int | None = None
 
+    save: str | None = None
+
     @model_validator(mode="after")
     def validate_path_and_interval(self):
         if (self.path is None) != (self.interval is None):
@@ -260,6 +262,7 @@ def resolve_env_vars(config: Config) -> None:
         return valid_vars
 
     # Check for any invalid ZERO_BAND_ environment variables
+
     valid_env_vars = _get_valid_env_vars("", config)
     invalid_vars = []
     for env_var in os.environ:

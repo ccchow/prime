@@ -190,7 +190,7 @@ def main(config: ExportConfig):
     logger.info(f"Exporting checkpoint from {config.ckpt.path} with config {config.model_dump_json(indent=2)}")
 
     # Resolve environment variables in paths
-    config = resolve_env_vars(config)
+    resolve_env_vars(config)
     ckpt_path = Path(config.ckpt.path)
     resume_path = Path(config.ckpt.resume) if config.ckpt.resume else ckpt_path / "consolidated" / "consolidated.pth"
     save_path = Path(config.ckpt.save) if config.ckpt.save else ckpt_path / "hf_export"
