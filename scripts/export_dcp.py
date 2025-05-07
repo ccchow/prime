@@ -8,6 +8,8 @@ from typing import Literal
 import torch.distributed.checkpoint as dcp
 from zeroband.models.llama import get_model as get_model_llama
 from zeroband.models.qwen2 import get_model as get_model_qwen2
+from zeroband.models.llama import ModelArgs as LlamaModelArgs # Added import
+from zeroband.models.qwen2 import ModelArgs as Qwen2ModelArgs # Added import
 from zeroband.config import resolve_env_vars
 from zeroband.checkpoint import ModelWrapper
 from zeroband.utils import get_module_signature
@@ -196,15 +198,16 @@ def main(config: ExportConfig):
     save_path = Path(config.ckpt.save) if config.ckpt.save else ckpt_path / "hf_export"
     save_path.mkdir(parents=True, exist_ok=True)
 
-    logger.info(f"Loading tokenizer from {config.data.tokenizer_path}")
-    tokenizer = AutoTokenizer.from_pretrained(config.data.tokenizer_path)
+    tokenizer_path_to_load = getattr(config.data, "tokenizer_path", config.name_model)
+    logger.info(f"Loading tokenizer from {tokenizer_path_to_load}")
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path_to_load, trust_remote_code=True)
 
     logger.info(f"Loading ZeroBand model config for {config.type_model} {config.name_model}")
     if config.type_model == "qwen2":
         get_model_fn = get_model_qwen2
         ModelArgsClass = Qwen2ModelArgs
         remap_fn = remap_keys_qwen2
-        convert_config_fn = convert_config_zb_to_hf_qwen2
+        convert_config_fn = convert_config_zb_to_hf # Changed from convert_config_zb_to_hf_qwen2
         HFConfigClass = Qwen2Config
     elif config.type_model.startswith("llama"):
         get_model_fn = get_model_llama
