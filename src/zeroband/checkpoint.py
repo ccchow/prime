@@ -1,3 +1,4 @@
+import cloudpickle
 from dataclasses import dataclass
 import gc
 import multiprocessing
@@ -297,7 +298,7 @@ class CkptManager:
                     state = {}
                     state["optimizer"] = OuterOptimizerWrapper(self.diloco_offloaded_optimizer).state_dict()
 
-                    torch.save(state, f)
+                    torch.save(state, f, pickle_module=cloudpickle)
 
             data_path = os.path.join(ckpt_path, "data")
             self.save_data(data_path, self.dataloader, self.world_info.local_rank)
@@ -320,7 +321,7 @@ class CkptManager:
         os.makedirs(data_path, exist_ok=True)
         with open(os.path.join(data_path, f"_{local_rank}.pt"), "wb") as f:
             state = {"data_loader": dataloader.state_dict()}
-            torch.save(state, f)
+            torch.save(state, f, pickle_module=cloudpickle)
 
     def _async_save_remote(self, ckpt_path: str, remote_ckpt_path: str, blocking: bool = True) -> None:
         """asyncronously rsync a ckpt folder to a remote location. Using fsspec to handle remote cloud storage without to install
@@ -354,7 +355,7 @@ class CkptManager:
 
         if self.world_info.local_rank == 0:
             if self.config.topk is not None:
-                delete_topk(self.logger, self.config.path, self.config.topk)
+                delete_topk(self._logger, self.config.path, self.config.topk)
 
     def _del__(self):
         self.wait_for_blocking_job()
@@ -370,7 +371,7 @@ class CkptManager:
         data_path = os.path.join(resume_ckpt_path, "data")
 
         with open(os.path.join(data_path, f"_{world_info.local_rank}.pt"), "rb") as f:
-            state = torch.load(f)
+            state = torch.load(f, pickle_module=cloudpickle)
             self.dataloader.load_state_dict(state["data_loader"])
 
     @torch.no_grad()
@@ -415,7 +416,7 @@ class CkptManager:
 
         if self.diloco_offloaded_optimizer:
             with open(os.path.join(resume_ckpt_path, f"__{world_info.local_rank}_0.pt"), "rb") as f:
-                rank_state_dict = torch.load(f)
+                rank_state_dict = torch.load(f, pickle_module=cloudpickle)
 
             opt_wrapper = OuterOptimizerWrapper(self.diloco_offloaded_optimizer)
             opt_wrapper.load_state_dict(rank_state_dict["optimizer"])
