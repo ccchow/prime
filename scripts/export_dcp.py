@@ -135,11 +135,8 @@ def main(config: ExportConfig):
 
     logger.info("Getting model")
     model, model_config = get_model(
-        config.name_model,
-        config.type_model,
-        vocab_size=len(tokenizer),
-        seq_length=config.data.seq_length,
-        attn_fn=config.train.attn_fn,
+        config,
+        len(tokenizer)
     )
 
     # Convert ZeroBand config to HuggingFace config
@@ -162,7 +159,7 @@ def main(config: ExportConfig):
     logger.info("After load: %s", get_module_signature(model))
 
     # Convert model to HuggingFace format
-    num_shards = int(sum(p.numel() for p in model.parameters()) / 1e9)
+    num_shards = max(1, int(sum(p.numel() for p in model.parameters()) / 1e9))
     state_dict = model.state_dict()
 
     index_json = {}
