@@ -6,7 +6,10 @@
 import torch
 from typing import Literal
 import torch.distributed.checkpoint as dcp
-from zeroband.models.llama import get_model
+from zeroband.models.llama import get_model as get_model_llama
+from zeroband.models.qwen2 import get_model as get_model_qwen2
+from zeroband.models.llama import ModelArgs as LlamaModelArgs # Added import
+from zeroband.models.qwen2 import ModelArgs as Qwen2ModelArgs # Added import
 from zeroband.config import resolve_env_vars
 from zeroband.checkpoint import ModelWrapper
 from zeroband.utils import get_module_signature
@@ -14,13 +17,15 @@ from zeroband.train import Config
 from zeroband.utils.logger import get_logger
 from pydantic_config import parse_argv
 from transformers import AutoTokenizer
+from transformers import LlamaConfig
+from transformers import Qwen2Config
+from transformers.generation import GenerationConfig
 import math
+import re
 from pathlib import Path
 from safetensors.torch import save_file
 import json
-from zeroband.models.llama import ModelArgs
-from transformers import LlamaConfig
-from transformers.generation import GenerationConfig
+import torch
 
 
 class ExportConfig(Config):
@@ -42,6 +47,33 @@ def remap_keys_llama(k: str) -> str:
     )
 
 
+def remap_keys_qwen2(k: str) -> str:
+    """Maps ZeroBand Qwen2 keys back to HuggingFace Qwen2 keys."""
+    # Remove 'model.' prefix added during loading
+    if k.startswith("model."):
+        k = k[len("model.") :]
+
+    # Handle lm_head separately (was adjusted during loading)
+    if k == "lm_head.weight":
+        return k  # Already correct HF key
+
+    # Reverse the gate/up proj split
+    m_gate = re.match(r"layers\.(\d+)\.mlp\.gate_proj\.(weight|bias)", k)
+    if m_gate:
+        layer_idx, wb = m_gate.groups()
+        # We'll handle this when we see the corresponding up_proj
+        return None  # Signal to skip this key for now
+
+    m_up = re.match(r"layers\.(\d+)\.mlp\.up_proj\.(weight|bias)", k)
+    if m_up:
+        layer_idx, wb = m_up.groups()
+        # Return the fused HF key name
+        return f"layers.{layer_idx}.mlp.gate_up_proj.{wb}"
+
+    # Default: should be a direct match after removing 'model.'
+    return k
+
+
 def _get_ffn_dim(hidden_dim: int, ffn_dim_multiplier: float, multiple_of: int) -> int:
     """Get the FFN dimension from ZeroBand args"""
     hidden_dim = int(8 * hidden_dim / 3)
@@ -53,40 +85,75 @@ def _get_ffn_dim(hidden_dim: int, ffn_dim_multiplier: float, multiple_of: int) -
 
 
 def convert_config_zb_to_hf(
-    zb_config: ModelArgs, with_debug_automap: bool = False, type_model: str = "llama3"
-) -> LlamaConfig:
+    zb_config, with_debug_automap: bool = False, type_model: str = "llama3"
+):
     """Convert ZeroBand config to HuggingFace config"""
-    config = LlamaConfig()
-    config.hidden_size = zb_config.dim
-    config.num_hidden_layers = zb_config.n_layers
-    config.num_attention_heads = zb_config.n_heads
-    config.num_key_value_heads = zb_config.n_kv_heads
-    config.vocab_size = zb_config.vocab_size
-    config.intermediate_size = _get_ffn_dim(zb_config.dim, zb_config.ffn_dim_multiplier, zb_config.multiple_of)
-    config.rms_norm_eps = zb_config.norm_eps
-    config.rope_theta = float(zb_config.rope_theta)
-    config.max_position_embeddings = zb_config.max_seq_len
+    if type_model == "qwen2":
+        config = Qwen2Config()
+        config.hidden_size = zb_config.dim
+        config.num_hidden_layers = zb_config.n_layers
+        config.num_attention_heads = zb_config.n_heads
+        config.num_key_value_heads = zb_config.n_kv_heads or zb_config.n_heads  # HF uses num_key_value_heads
+        config.vocab_size = zb_config.vocab_size
+        # Qwen2 uses intermediate_size directly if provided in ModelArgs
+        config.intermediate_size = (
+            zb_config.intermediate_size
+            or _get_ffn_dim(zb_config.dim, zb_config.ffn_dim_multiplier, zb_config.multiple_of)
+        )
+        config.rms_norm_eps = zb_config.norm_eps
+        config.rope_theta = float(zb_config.rope_theta)
+        config.max_position_embeddings = (
+            zb_config.max_position_embeddings or zb_config.max_seq_len
+        )  # Use max_position_embeddings if available
+        config.max_window_layers = zb_config.max_window_layers or zb_config.n_layers  # Default to all layers if not specified
+        config.use_sliding_window = zb_config.use_sliding_window or False
+        config.sliding_window = zb_config.sliding_window  # Can be None if use_sliding_window is False
 
-    if type_model == "llama2":
-        config.bos_token_id = [1]
-        config.eos_token_id = [2]
-    else:
-        config.bos_token_id = [128000]
-        config.eos_token_id = [128001, 128008, 128009]
+        # Standard Qwen2 token IDs
+        config.bos_token_id = 151643  # <|im_start|>
+        config.eos_token_id = 151645  # <|im_end|>
+        # config.pad_token_id = 151643 # Often set same as BOS or a dedicated pad token if vocab has one
 
-    config.architectures = ["LlamaForCausalLM"]
+        config.architectures = ["Qwen2ForCausalLM"]
 
-    # Rope scaling
-    config.rope_scaling = {
-        "original_max_position_embeddings": 8192,
-        "rope_type": "default",
-    }
+        # Set torch_dtype based on export config
+        config.torch_dtype = config.torch_dtype
 
-    if with_debug_automap:
-        config.auto_map = {
-            "AutoConfig": "PrimeIntellect/prime-llama-debug--configuration_llama.LlamaConfig",
-            "AutoModelForCausalLM": "PrimeIntellect/prime-llama-debug--modeling_llama.LlamaForCausalLM",
+        # Add other relevant fields if needed, e.g., tie_word_embeddings
+        # config.tie_word_embeddings = False # Or True based on your model
+
+    else:  # Default to Llama config
+        config = LlamaConfig()
+        config.hidden_size = zb_config.dim
+        config.num_hidden_layers = zb_config.n_layers
+        config.num_attention_heads = zb_config.n_heads
+        config.num_key_value_heads = zb_config.n_kv_heads
+        config.vocab_size = zb_config.vocab_size
+        config.intermediate_size = _get_ffn_dim(zb_config.dim, zb_config.ffn_dim_multiplier, zb_config.multiple_of)
+        config.rms_norm_eps = zb_config.norm_eps
+        config.rope_theta = float(zb_config.rope_theta)
+        config.max_position_embeddings = zb_config.max_seq_len
+
+        if type_model == "llama2":
+            config.bos_token_id = [1]
+            config.eos_token_id = [2]
+        else:
+            config.bos_token_id = [128000]
+            config.eos_token_id = [128001, 128008, 128009]
+
+        config.architectures = ["LlamaForCausalLM"]
+
+        # Rope scaling
+        config.rope_scaling = {
+            "original_max_position_embeddings": 8192,
+            "rope_type": "default",
         }
+
+        if with_debug_automap:
+            config.auto_map = {
+                "AutoConfig": "PrimeIntellect/prime-llama-debug--configuration_llama.LlamaConfig",
+                "AutoModelForCausalLM": "PrimeIntellect/prime-llama-debug--modeling_llama.LlamaForCausalLM",
+            }
 
     return config
 
@@ -119,104 +186,120 @@ def convert_qk_from_complex_to_rotate_half(linear_weight: torch.FloatTensor, hea
     return new_weight
 
 
+@torch.no_grad()
 def main(config: ExportConfig):
-    # Create save path
-    save_path = Path(config.ckpt.path)
+    logger = get_logger()
+    logger.info(f"Exporting checkpoint from {config.ckpt.path} with config {config.model_dump_json(indent=2)}")
+
+    # Resolve environment variables in paths
+    resolve_env_vars(config)
+    ckpt_path = Path(config.ckpt.path)
+    resume_path = Path(config.ckpt.resume) if config.ckpt.resume else ckpt_path / "consolidated" / "consolidated.pth"
+    save_path = Path(config.ckpt.save) if config.ckpt.save else ckpt_path / "hf_export"
     save_path.mkdir(parents=True, exist_ok=True)
 
-    # Load model
-    logger.info("Getting tokenizer (for vocab size)")
-    if config.type_model == "llama2":
-        tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1", use_fast=True)
-    elif config.type_model == "llama3":
-        tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B", use_fast=True)
+    tokenizer_path_to_load = getattr(config.data, "tokenizer_path", config.name_model)
+    logger.info(f"Loading tokenizer from {tokenizer_path_to_load}")
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path_to_load, trust_remote_code=True)
+
+    logger.info(f"Loading ZeroBand model config for {config.type_model} {config.name_model}")
+    if config.type_model == "qwen2":
+        get_model_fn = get_model_qwen2
+        ModelArgsClass = Qwen2ModelArgs
+        remap_fn = remap_keys_qwen2
+        convert_config_fn = convert_config_zb_to_hf # Changed from convert_config_zb_to_hf_qwen2
+        HFConfigClass = Qwen2Config
+    elif config.type_model.startswith("llama"):
+        get_model_fn = get_model_llama
+        ModelArgsClass = LlamaModelArgs
+        remap_fn = remap_keys_llama
+        convert_config_fn = convert_config_zb_to_hf
+        HFConfigClass = LlamaConfig
     else:
-        raise ValueError(f"Model type {config.type_model} not supported")
+        raise ValueError(f"Unsupported model type for export: {config.type_model}")
 
-    logger.info("Getting model")
-    model, model_config = get_model(
-        config.name_model,
-        config.type_model,
-        vocab_size=len(tokenizer),
-        seq_length=config.data.seq_length,
-        attn_fn=config.train.attn_fn,
-    )
+    model, zb_model_args = get_model_fn(config, vocab_size=tokenizer.vocab_size)
+    model = ModelWrapper(model)  # Wrap for checkpoint loading
 
-    # Convert ZeroBand config to HuggingFace config
-    hf_config = convert_config_zb_to_hf(
-        model_config, with_debug_automap=config.with_debug_automap, type_model=config.type_model
-    )
-    hf_config.to_json_file(save_path / "config.json")
+    logger.info(f"Loading checkpoint state dict from {resume_path}")
+    state_dict = torch.load(resume_path, map_location="cpu")
+    if "model" in state_dict:  # Handle nested state dicts
+        state_dict = state_dict["model"]
 
-    # Load checkpoint
-    logger.info("Before load: %s", get_module_signature(model))
-    states = {
-        "model": ModelWrapper(model),
-    }
-    logger.info("Loading from %s", config.ckpt.resume)
-    dcp.load(
-        state_dict=states,
-        checkpoint_id=config.ckpt.resume,
-    )
+    # Filter out optimizer states if present
+    state_dict = {k: v for k, v in state_dict.items() if not k.startswith("optim")}
 
-    logger.info("After load: %s", get_module_signature(model))
+    # Remap keys and handle fused layers for Qwen2
+    hf_state_dict = {}
+    pending_gate_projs = {}  # Store gate_proj tensors temporarily for Qwen2 fusion
 
-    # Convert model to HuggingFace format
-    num_shards = int(sum(p.numel() for p in model.parameters()) / 1e9)
-    state_dict = model.state_dict()
+    for k, v in state_dict.items():
+        hf_key = remap_fn(k)
+        if hf_key is None:  # Special handling for Qwen2 gate_proj
+            if config.type_model == "qwen2":
+                m_gate = re.match(r"model\.layers\.(\d+)\.mlp\.gate_proj\.(weight|bias)", k)
+                if m_gate:
+                    layer_idx, wb = m_gate.groups()
+                    pending_gate_projs[(layer_idx, wb)] = v
+                else:
+                    logger.warning(f"Skipping unexpected key during Qwen2 remapping: {k}")
+            continue  # Skip this key for now
 
-    index_json = {}
-    total_size = 0
-    state_dict = {remap_keys_llama(k): v for k, v in state_dict.items()}
-    if not config.with_debug_automap:  # The debug uses complex rotary impl
-        with torch.no_grad():
-            for i in range(hf_config.num_hidden_layers):
-                old_q = state_dict[f"model.layers.{i}.self_attn.q_proj.weight"]
-                old_k = state_dict[f"model.layers.{i}.self_attn.k_proj.weight"]
-                new_q = convert_qk_from_complex_to_rotate_half(old_q, 128)
-                new_k = convert_qk_from_complex_to_rotate_half(old_k, 128)
-                state_dict[f"model.layers.{i}.self_attn.q_proj.weight"].copy_(new_q)
-                state_dict[f"model.layers.{i}.self_attn.k_proj.weight"].copy_(new_k)
-    if "model.freqs_cis" in state_dict:  # This should not be persisted
-        del state_dict["model.freqs_cis"]
-    if config.torch_dtype == "bfloat16":
-        state_dict = {k: v.to(torch.bfloat16) for k, v in state_dict.items()}
+        # Fuse gate_proj and up_proj for Qwen2
+        if config.type_model == "qwen2":
+            m_up = re.match(r"layers\.(\d+)\.mlp\.up_proj\.(weight|bias)", hf_key)
+            if m_up:
+                layer_idx, wb = m_up.groups()
+                if (layer_idx, wb) in pending_gate_projs:
+                    gate_tensor = pending_gate_projs.pop((layer_idx, wb))
+                    # Concatenate gate and up tensors
+                    fused_tensor = torch.cat([gate_tensor, v], dim=0)
+                    hf_state_dict[f"model.{hf_key}"] = fused_tensor.to(getattr(torch, config.torch_dtype))
+                    continue  # Move to next key after fusion
+                else:
+                    logger.error(f"Found up_proj key {hf_key} but no matching gate_proj key was stored.")
+                    # Fall through to default handling, might cause issues
 
-    # Save model
-    state_keys = list(state_dict.keys())
-    shard_size = int(math.ceil(len(state_keys) / num_shards))
-    logger.info("Saving model to %d shards", num_shards)
+        # Default handling for Llama and non-fused Qwen2 keys
+        # Add 'model.' prefix if needed (HF usually expects it, except for lm_head)
+        final_hf_key = hf_key if hf_key == "lm_head.weight" else f"model.{hf_key}"
+        hf_state_dict[final_hf_key] = v.to(getattr(torch, config.torch_dtype))
 
-    for i in range(num_shards):
-        _file = save_path / f"model-{i:04}-of-{num_shards:04}.{config.save_format}"
-        start = i * shard_size
-        end = min((i + 1) * shard_size, len(state_keys))
-        shard = {k: state_dict[k] for k in state_keys[start:end]}
+    # Check if any gate_proj keys were left over for Qwen2
+    if config.type_model == "qwen2" and pending_gate_projs:
+        logger.error(f"Found unmatched gate_proj keys: {list(pending_gate_projs.keys())}")
 
-        index_json.update({k: _file.name for k in shard.keys()})
-        total_size += sum(p.numel() for p in shard.values())
-        if config.save_format == "pt":
-            torch.save(shard, _file)
-        else:
-            save_file(shard, _file, metadata=dict(format="pt"))
+    logger.info(f"Saving HuggingFace state dict with {len(hf_state_dict)} keys.")
+    if config.save_format == "safetensors":
+        save_fn = save_file
+        save_name = "model.safetensors"
+    else:
+        save_fn = torch.save
+        save_name = "pytorch_model.bin"
 
-    json.dump(
-        {
-            "weight_map": index_json,
-            "metadata": {
-                "total_size": total_size * (2 if config.torch_dtype == "bfloat16" else 4),
-            },
-        },
-        (save_path / "model.safetensors.index.json").open("w"),
-        indent=2,
-    )
+    save_fn(hf_state_dict, save_path / save_name)
+    logger.info(f"Saved state dict to {save_path / save_name}")
 
-    # Save Tokenizer
+    logger.info("Converting and saving HuggingFace config file.")
+    hf_config = convert_config_fn(zb_model_args, config.with_debug_automap, type_model=config.type_model)
+    hf_config.torch_dtype = config.torch_dtype  # Ensure dtype matches saved tensors
+    hf_config.save_pretrained(save_path)
+    logger.info(f"Saved config.json to {save_path}")
+
+    logger.info("Saving tokenizer files.")
     tokenizer.save_pretrained(save_path)
+    logger.info(f"Saved tokenizer files to {save_path}")
 
-    # Save Generation Config
-    gconfig = GenerationConfig(max_length=100, use_cache=False, temperature=0.7, top_k=None, do_sample=True)
-    gconfig.save_pretrained(save_path)
+    # Save generation config (optional, basic example)
+    gen_config = GenerationConfig(
+        bos_token_id=hf_config.bos_token_id,
+        eos_token_id=hf_config.eos_token_id,
+        # pad_token_id=hf_config.pad_token_id, # Uncomment if pad_token_id is set
+    )
+    gen_config.save_pretrained(save_path)
+    logger.info(f"Saved generation_config.json to {save_path}")
+
+    logger.info("Export complete.")
 
 
 if __name__ == "__main__":

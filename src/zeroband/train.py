@@ -16,6 +16,11 @@ from zeroband.diloco import Diloco
 from zeroband.loss import compute_cross_entropy_loss
 from zeroband.lr_scheduler import get_scheduler
 from zeroband.models.llama import get_model
+from zeroband.models.hf_llama import load_llama_model, load_llama_tokenizer  # Import LLaMA integration helpers
+from zeroband.models.hf_gpt2 import load_gpt2_model, load_gpt2_tokenizer  # Import GPT-2 integration helpers
+from zeroband.models.hf_qwen import load_qwen2_omni_model, load_qwen2_omni_tokenizer  # Import Qwen HF integration
+from zeroband.models.qwen import get_model as get_qwen_model  # Import Prime custom Qwen model
+from zeroband.models.qwen2 import get_model as get_qwen2_model, load_hf_weights  # Import Prime custom Qwen2 model
 from zeroband.optimizers import get_optimizer
 from zeroband.utils import (
     FakeTokenizer,
@@ -96,14 +101,31 @@ def train(config: Config):
 
     # Load tokenizer
     with sw.record_block("Load Tokenizer"):
+        # 1. Load tokenizer, support custom HuggingFace Qwen2.5-Omni and existing models
         if config.data.fake and config.name_model == "debugmodel":
             tokenizer = FakeTokenizer()
-        elif config.type_model == "llama2":
-            tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1", use_fast=True)
-        elif config.type_model == "llama3":
-            tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B", use_fast=True)
+        elif config.hf_model_name or config.type_model == "qwen2":
+            # Use HF tokenizer for Qwen2 or other Hugging Face models
+            if config.type_model == "qwen2" or (config.hf_model_name and "Qwen" in config.hf_model_name):
+                tokenizer = load_qwen2_omni_tokenizer(config)
+            elif config.hf_model_name and config.type_model in ("llama2", "llama3"):
+                tokenizer = load_llama_tokenizer(config)
+            elif config.hf_model_name and config.type_model == "gpt2":
+                tokenizer = load_gpt2_tokenizer(config)
+            else:
+                raise ValueError(f"Tokenizer for Hugging Face model or qwen2 not supported: type_model={config.type_model}, hf_model_name={config.hf_model_name}")
         else:
-            raise ValueError(f"Model type {config.type_model} not supported")
+            # Use our specialized tokenizer loader for non-HF models
+            if config.type_model in ("llama2", "llama3"):
+                tokenizer = load_llama_tokenizer(config)
+            elif config.type_model == "gpt2":
+                tokenizer = load_gpt2_tokenizer(config)
+            elif config.type_model == "qwen":
+                tokenizer = load_qwen2_omni_tokenizer(config)
+            elif config.type_model == "qwen2":
+                tokenizer = AutoTokenizer.from_pretrained(config.name_model, use_fast=True)
+            else:
+                raise ValueError(f"Model type {config.type_model} not supported")
 
     with sw.record_block("Get Dataloader"):
         train_dataloader = get_dataloader(
@@ -116,10 +138,38 @@ def train(config: Config):
         train_dataloader_iterator = iter(train_dataloader)
 
     with sw.record_block("Get Model"):
-        model, model_config = get_model(
-            config,
-            vocab_size=len(tokenizer) if config.name_model != "debugmodel" or not config.data.fake else TEST_VOCAB_SIZE,
-        )
+        # 2. Load model (HF LLaMA, GPT-2, or custom) and config
+        if config.hf_model_name:
+            # Use Hugging Face model loader based on model name or type
+            if "Qwen" in config.hf_model_name:
+                model, model_config = load_qwen2_omni_model(config)
+            elif config.type_model in ("llama2", "llama3"):
+                model, model_config = load_llama_model(config)
+            elif config.type_model == "gpt2":
+                model, model_config = load_gpt2_model(config)
+            else:
+                raise ValueError(f"Hugging Face model {config.hf_model_name} not supported")
+        else:
+            # Use Prime's custom model implementation
+            if config.type_model in ("llama2", "llama3"):
+                model, model_config = get_model(
+                    config,
+                    vocab_size=len(tokenizer) if config.name_model != "debugmodel" or not config.data.fake else TEST_VOCAB_SIZE,
+                )
+            elif config.type_model == "gpt2":
+                model, model_config = load_gpt2_model(config)
+            elif config.type_model == "qwen":
+                model, model_config = get_qwen_model(
+                    config,
+                    vocab_size=len(tokenizer) if config.name_model != "debugmodel" or not config.data.fake else TEST_VOCAB_SIZE,
+                )
+            elif config.type_model == "qwen2":
+                # For custom Qwen2, use pretrained HF weights; preserve vocab_size from ModelArgs
+                vocab_override = TEST_VOCAB_SIZE if (config.data.fake and config.name_model == "debugmodel") else None
+                model, model_config = get_qwen2_model(config, vocab_size=vocab_override)
+                model = load_hf_weights(model, config.name_model)
+            else:
+                raise ValueError(f"Model type {config.type_model} not supported")
 
     gpu_peak_flops = get_peak_flops(torch.cuda.get_device_name(torch.device("cuda")))
     logger.info(f"Peak FLOPS used for computing MFU: {gpu_peak_flops:.3e}")
@@ -305,7 +355,11 @@ def train(config: Config):
                         block_mask = batch["block_mask"]
 
                     with sw.record_block("Run forward()"):
-                        logits = model(tokens=input_ids, block_mask=block_mask).contiguous()
+                        # logits = model(tokens=input_ids, block_mask=block_mask).contiguous()
+                        outputs = model(input_ids=input_ids, block_mask=block_mask)
+                        # Qwen2 returns a tuple (logits, ...); unpack it
+                        logits = outputs[0] if isinstance(outputs, (tuple, list)) else outputs
+                        logits = logits.contiguous()
                         flatten_logits = logits.reshape(-1, logits.size(-1))  # b seq vocab -> (b * seq) vocab
                         flatten_labels = labels.reshape(-1)  # b seq -> (b * seq)
 

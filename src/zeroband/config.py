@@ -133,6 +133,8 @@ class CkptConfig(BaseConfig):
 
     token_count: int | None = None
 
+    save: str | None = None
+
     @model_validator(mode="after")
     def validate_path_and_interval(self):
         if (self.path is None) != (self.interval is None):
@@ -156,8 +158,10 @@ ENV_VAR_PREFIX = "ZERO_BAND_"
 
 class Config(BaseConfig):
     # main config
-    name_model: Literal["debugmodel", "70M","150M", "271M", "1B", "7B", "10B", "13B", "26B", "70B"] = "150M"
-    type_model: Literal["llama2", "llama3"] = "llama3"
+    name_model: Literal["debugmodel", "70M","150M", "271M", "1B", "7B", "10B", "13B", "26B", "70B", "Qwen/Qwen2.5-0.5B"] = "150M"
+    type_model: Literal["llama2", "llama3", "gpt2", "qwen", "qwen2"] = "llama3"
+    # Hugging Face model support - overrides name_model and type_model when specified
+    hf_model_name: str | None = None  # Path or name of a pretrained model on Hugging Face Hub
 
     # Project/Run
     project: str = "zeroband"
@@ -258,6 +262,7 @@ def resolve_env_vars(config: Config) -> None:
         return valid_vars
 
     # Check for any invalid ZERO_BAND_ environment variables
+
     valid_env_vars = _get_valid_env_vars("", config)
     invalid_vars = []
     for env_var in os.environ:

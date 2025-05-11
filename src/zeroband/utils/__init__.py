@@ -47,29 +47,63 @@ def get_peak_flops(device_name: str) -> int:
     else:  # for other GPU types, assume A100
         return 312e12
 
-
 def get_num_flop_per_token(num_params: int, model_config, seq_len) -> int:
-    l, h, q, t = (  # noqa: E741
-        model_config.n_layers,
-        model_config.n_heads,
-        model_config.dim // model_config.n_heads,
-        seq_len,
-    )
+    # Handle different model architectures with different config attribute naming.
+    # This includes common Hugging Face model configurations (e.g., LLaMA, GPT-2)
+    # loaded via helper functions, as well as custom model configs.
+    if hasattr(model_config, 'n_layers'):
+        # LLaMA-style config (e.g., from HF LlamaConfig or custom)
+        num_layers = model_config.n_layers
+        num_heads = model_config.n_heads
+        hidden_dim = model_config.dim
+        head_dim = hidden_dim // num_heads
+    elif hasattr(model_config, 'n_layer'):
+        # GPT-2 style config (e.g., from HF GPT2Config or custom)
+        num_layers = model_config.n_layer
+        num_heads = model_config.n_head
+        hidden_dim = model_config.n_embd
+        head_dim = hidden_dim // num_heads
+    else:
+        raise ValueError("Unsupported model config: missing layer/dimension information")
+    
     # Reasoning behind the factor of 12 for the self-attention part of the formula:
     # 1. each self-attention has 2 matmul in the forward and 4 in the backward (6)
     # 2. the flash attention does 1 more matmul recomputation in the backward
     #    but recomputation should not be counted in calculating MFU           (+0)
     # 3. each matmul performs 1 multiplication and 1 addition                 (*2)
     # 4. we follow the convention and do not account for sparsity in causal attention
-    flop_per_token = 6 * num_params + 12 * l * h * q * t
+    flop_per_token = 6 * num_params + 12 * num_layers * num_heads * head_dim * seq_len
 
     return flop_per_token
+
+# def get_num_flop_per_token(num_params: int, model_config, seq_len) -> int:
+#     l, h, q, t = (  # noqa: E741
+#         model_config.n_layers,
+#         model_config.n_heads,
+#         model_config.dim // model_config.n_heads,
+#         seq_len,
+#     )
+#     # Reasoning behind the factor of 12 for the self-attention part of the formula:
+#     # 1. each self-attention has 2 matmul in the forward and 4 in the backward (6)
+#     # 2. the flash attention does 1 more matmul recomputation in the backward
+#     #    but recomputation should not be counted in calculating MFU           (+0)
+#     # 3. each matmul performs 1 multiplication and 1 addition                 (*2)
+#     # 4. we follow the convention and do not account for sparsity in causal attention
+#     flop_per_token = 6 * num_params + 12 * l * h * q * t
+
+#     return flop_per_token
 
 
 def get_num_params(model: torch.nn.Module, exclude_embedding: bool = False) -> int:
     num_params = sum(p.numel() for p in model.parameters())
     if exclude_embedding:
-        num_params -= model.tok_embeddings.weight.numel()
+        # Handle different model architectures
+        if hasattr(model, 'tok_embeddings'):
+            # LLaMA-style models
+            num_params -= model.tok_embeddings.weight.numel()
+        elif hasattr(model, 'transformer') and hasattr(model.transformer, 'wte'):
+            # GPT-2 models
+            num_params -= model.transformer.wte.weight.numel()
     return num_params
 
 
